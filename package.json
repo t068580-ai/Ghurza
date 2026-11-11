@@ -1,0 +1,45 @@
+{
+  "name": "ghurza",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "setup": "node scripts/ensure-env.mjs && prisma migrate reset --force",
+    "predev": "node scripts/ensure-env.mjs && prisma migrate deploy && prisma db execute --file prisma/sql/triggers.sql --schema prisma/schema.prisma",
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "db:reset": "node scripts/ensure-env.mjs && prisma migrate reset --force",
+    "db:seed": "prisma db seed",
+    "audit:deps": "npm audit --omit=dev",
+    "test:security": "tsx --conditions=react-server scripts/security-selftest.ts && node scripts/check-triggers.mjs"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "5.22.0",
+    "next": "16.4.6",
+    "react": "19.2.9",
+    "react-dom": "19.2.9",
+    "server-only": "0.0.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "20.16.11",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "prisma": "5.22.0",
+    "tsx": "4.23.15",
+    "typescript": "5.6.3"
+  },
+  "allowScripts": {
+    "prisma@5.22.0": true,
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "esbuild@0.28.2": true
+  }
+}

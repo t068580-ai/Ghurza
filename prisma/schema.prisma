@@ -1,0 +1,319 @@
+// Tailor marketplace: Prisma 5.22 + SQLite.
+//
+// ENUMS: the SQLite connector in Prisma 5 has no native enums, so every enum-like column is a
+// String. Allowed values are defined ONCE in lib/enums.ts (`as const` arrays, enforced by zod
+// z.enum on every write) and the critical ones are re-checked by SQLite triggers in
+// prisma/sql/triggers.sql (re-applied idempotently on every `npm run dev`).
+//
+// MONEY: always Int fils (1 KWD = 1000 fils). Never Float or Decimal.
+// IDS: cuid strings. Message and AuditLog use autoincrement Ints (exact cursors).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["omitApi"] // lets lib/db.ts omit User.passwordHash from every query by default
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique // trimmed + lowercased, max 254; shown only to its owner
+  passwordHash      String // "scrypt$32768$8$3$<saltB64url>$<hashB64url>"; globally omitted, read only in lib/auth
+  role              String // "CUSTOMER" | "TAILOR"; chosen at signup, immutable (trigger user_role_immutable)
+  displayName       String // 2..60 chars
+  passwordChangedAt DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  sessions        Session[]
+  tailorProfile   TailorProfile? // exists only when role = "TAILOR"
+  requests        Request[]      @relation("RequestCustomer")
+  bids            Bid[]          @relation("BidTailor")
+  customerOrders  Order[]        @relation("OrderCustomer")
+  tailorOrders    Order[]        @relation("OrderTailor")
+  payments        Payment[]      @relation("PaymentCustomer")
+  messages        Message[]      @relation("MessageSender")
+  reviewsGiven    Review[]       @relation("ReviewCustomer")
+  reviewsReceived Review[]       @relation("ReviewTailor")
+  uploads         Upload[]       @relation("UploadOwner")
+  auditLogs       AuditLog[]
+}
+
+// Opaque server-side session. The cookie carries a 256-bit random token; only its SHA-256 is stored.
+model Session {
+  id         String   @id // sha256(token) as 64 hex chars
+  userId     String
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now()) // idle timeout 24 h, refreshed at most every 5 min
+  expiresAt  DateTime // absolute: createdAt + 7 days
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Editable public part of a tailor. Rating, review count, completed count and portfolio are NOT
+// stored: they are computed on read from Review / Order / OrderPhoto, so no counter can drift.
+model TailorProfile {
+  userId    String   @id
+  bio       String   @default("") // max 1000
+  city      String   @default("") // max 60
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Marketplace
+// ---------------------------------------------------------------------------
+
+model Request {
+  id               String    @id @default(cuid())
+  customerId       String // always the session user; never from the form
+  title            String // 3..120
+  pieceType        String // "ABAYA" | "THOBE" | "DISHDASHA" | "EVENING_GOWN" | "SUIT" | "ALTERATIONS" | "OTHER"
+  description      String // 10..4000
+  budgetMinFils    Int? // 0..10,000,000
+  budgetMaxFils    Int? // 0..10,000,000 and >= budgetMinFils when both are set
+  neededBy         DateTime? // UTC midnight, tomorrow .. today + 365 days
+  referencePhotoId String?   @unique // at most one reference photo per request
+  status           String    @default("OPEN") // "OPEN" | "AWARDED" | "CANCELLED"
+  awardedAt        DateTime? // set only by payment settlement
+  cancelledAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  customer       User      @relation("RequestCustomer", fields: [customerId], references: [id])
+  referencePhoto Upload?   @relation("RequestReferencePhoto", fields: [referencePhotoId], references: [id])
+  bids           Bid[]
+  order          Order? // 0..1 (Order.requestId is @unique)
+  payments       Payment[]
+
+  @@index([status, createdAt])
+  @@index([customerId, createdAt])
+}
+
+// The row holds the CURRENT values; the history lives in BidRevision.
+model Bid {
+  id             String    @id @default(cuid())
+  requestId      String
+  tailorId       String // always the session user
+  upfrontFils    Int // 1,000..10,000,000 (at least 1 KWD)
+  completionFils Int // 1,000..10,000,000 (at least 1 KWD, so COMPLETED always needs a verified payment)
+  totalFils      Int // upfrontFils + completionFils; stored so the blind-bidding MIN() runs in SQL (trigger bid_total_consistent)
+  turnaroundDays Int // 1..365
+  note           String? // max 1000, plain text
+  status         String    @default("PENDING") // "PENDING" | "DECLINED" | "ACCEPTED" | "LOST"
+  version        Int       @default(1) // = latest BidRevision.revisionNo; optimistic lock; snapshotted into Payment.bidVersion
+  declinedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  request   Request       @relation(fields: [requestId], references: [id])
+  tailor    User          @relation("BidTailor", fields: [tailorId], references: [id])
+  revisions BidRevision[]
+  payments  Payment[]
+  order     Order? // 0..1 (Order.bidId is @unique)
+
+  @@unique([requestId, tailorId]) // ONE bid per tailor per request
+  @@index([requestId, status])
+  @@index([tailorId, createdAt])
+}
+
+// Append-only. Written only in lib/bids.ts, in the same transaction as the Bid insert/update.
+// UPDATE and DELETE are blocked by SQLite triggers and by the query extension in lib/db.ts.
+model BidRevision {
+  id             String   @id @default(cuid())
+  bidId          String
+  revisionNo     Int // 1 = the original bid
+  upfrontFils    Int
+  completionFils Int
+  totalFils      Int
+  turnaroundDays Int
+  note           String?
+  statusBefore   String // "NEW" | "PENDING" | "DECLINED": bid status when this revision was made
+  createdAt      DateTime @default(now())
+
+  bid Bid @relation(fields: [bidId], references: [id])
+
+  @@unique([bidId, revisionNo])
+}
+
+// ---------------------------------------------------------------------------
+// Payments and orders
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id          String    @id @default(cuid())
+  kind        String // "UPFRONT" | "COMPLETION"
+  status      String    @default("PENDING") // "PENDING" | "PAID" | "FAILED" | "CANCELLED" | "REFUND_DUE"
+  amountFils  Int // copied on the server from Bid.upfrontFils or Order.completionFils; NEVER from the client
+  currency    String    @default("KWD")
+  customerId  String // payer = session user at creation
+  requestId   String
+  bidId       String
+  bidVersion  Int // Bid.version when checkout started; re-checked at settlement
+  orderId     String? // COMPLETION: set at creation. UPFRONT: set by settlement once the order exists
+  providerRef String?   @unique // mock provider reference, recorded from the verified callback
+  expiresAt   DateTime // createdAt + 30 min; the mock checkout refuses after this
+  paidAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  customer      User    @relation("PaymentCustomer", fields: [customerId], references: [id])
+  request       Request @relation(fields: [requestId], references: [id])
+  bid           Bid     @relation(fields: [bidId], references: [id])
+  order         Order?  @relation("OrderPayments", fields: [orderId], references: [id])
+  upfrontFor    Order?  @relation("OrderUpfrontPayment")
+  completionFor Order?  @relation("OrderCompletionPayment")
+
+  @@index([requestId, status])
+  @@index([bidId, status])
+  @@index([orderId, status])
+  @@index([customerId, createdAt])
+}
+
+// Created in exactly ONE place: settleVerifiedPayment() in lib/payments/settle.ts, after a
+// signature-verified PAID callback. Trigger orders_require_paid_upfront re-checks this on INSERT.
+model Order {
+  id                  String    @id @default(cuid())
+  requestId           String    @unique // ONE order per request
+  bidId               String    @unique // ONE order per bid
+  customerId          String // copied from Request.customerId
+  tailorId            String // copied from Bid.tailorId
+  upfrontPaymentId    String    @unique // the PAID UPFRONT payment that created this order
+  completionPaymentId String?   @unique // the PAID COMPLETION payment that completed it
+  upfrontFils         Int // snapshot of the paid bid version
+  completionFils      Int // snapshot
+  totalFils           Int // snapshot
+  turnaroundDays      Int // snapshot
+  status              String    @default("ACCEPTED") // "ACCEPTED" | "IN_PROGRESS" | "READY" | "COMPLETED" (trigger orders_status_guard)
+  createdAt           DateTime  @default(now())
+  startedAt           DateTime?
+  readyAt             DateTime?
+  completedAt         DateTime?
+  updatedAt           DateTime  @updatedAt
+
+  request           Request      @relation(fields: [requestId], references: [id])
+  bid               Bid          @relation(fields: [bidId], references: [id])
+  customer          User         @relation("OrderCustomer", fields: [customerId], references: [id])
+  tailor            User         @relation("OrderTailor", fields: [tailorId], references: [id])
+  upfrontPayment    Payment      @relation("OrderUpfrontPayment", fields: [upfrontPaymentId], references: [id])
+  completionPayment Payment?     @relation("OrderCompletionPayment", fields: [completionPaymentId], references: [id])
+  payments          Payment[]    @relation("OrderPayments")
+  messages          Message[]
+  photos            OrderPhoto[]
+  review            Review? // 0..1 (Review.orderId is @unique)
+
+  @@index([customerId, status])
+  @@index([tailorId, status])
+  @@map("orders") // ORDER is an SQL keyword; a plain table name keeps the trigger SQL readable
+}
+
+// ---------------------------------------------------------------------------
+// Order content
+// ---------------------------------------------------------------------------
+
+// Chat exists only on an Order. Immutable (triggers). senderId always comes from the session.
+model Message {
+  id        Int      @id @default(autoincrement()) // exact, monotonic polling cursor
+  orderId   String
+  senderId  String
+  body      String // 1..2000 after trim, plain text
+  createdAt DateTime @default(now())
+
+  order  Order @relation(fields: [orderId], references: [id])
+  sender User  @relation("MessageSender", fields: [senderId], references: [id])
+
+  @@index([orderId, id])
+}
+
+// Exactly one per COMPLETED order. Immutable (triggers). tailorId/customerId copied from the order.
+model Review {
+  id         String   @id @default(cuid())
+  orderId    String   @unique // ONE review per order
+  customerId String
+  tailorId   String
+  rating     Int // 1..5 (zod + trigger review_rating_range)
+  text       String // 10..2000
+  createdAt  DateTime @default(now())
+
+  order    Order @relation(fields: [orderId], references: [id])
+  customer User  @relation("ReviewCustomer", fields: [customerId], references: [id])
+  tailor   User  @relation("ReviewTailor", fields: [tailorId], references: [id])
+
+  @@index([tailorId, createdAt])
+}
+
+// Metadata for one stored image. Bytes live in <project>/uploads/<storedName>, outside public/,
+// and are served only by GET /api/files/[id] after canViewUpload().
+model Upload {
+  id         String   @id @default(cuid())
+  ownerId    String
+  kind       String // "REQUEST_REFERENCE" | "ORDER_FINISHED"
+  storedName String   @unique // `${randomUUID()}.jpg` or `.png`, generated by the server
+  mimeType   String // "image/jpeg" | "image/png", detected from magic bytes
+  sizeBytes  Int // 1..5,242,880 (after metadata stripping)
+  width      Int // 1..6000
+  height     Int // 1..6000
+  sha256     String
+  createdAt  DateTime @default(now())
+
+  owner      User        @relation("UploadOwner", fields: [ownerId], references: [id])
+  request    Request?    @relation("RequestReferencePhoto")
+  orderPhoto OrderPhoto?
+
+  @@index([ownerId, createdAt])
+}
+
+// Finished-piece photo on an order (max 6 per order, checked in lib/orders.ts).
+// Public portfolio item only when the order is COMPLETED and inPortfolio = true.
+model OrderPhoto {
+  id          String   @id @default(cuid())
+  orderId     String
+  uploadId    String   @unique
+  inPortfolio Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  order  Order  @relation(fields: [orderId], references: [id])
+  upload Upload @relation(fields: [uploadId], references: [id])
+
+  @@index([orderId])
+}
+
+// ---------------------------------------------------------------------------
+// Security infrastructure
+// ---------------------------------------------------------------------------
+
+// Fixed-window counters kept in the DB so they survive dev-server restarts and hot reloads.
+model RateLimit {
+  key          String    @id // e.g. "login:acct:<sha256(email)>", "login:ip:<ip>", "msg:<userId>:<orderId>"
+  count        Int
+  windowStart  DateTime
+  blockedUntil DateTime?
+}
+
+// Append-only (triggers). Never holds passwords, tokens, cookies, signatures or message bodies.
+model AuditLog {
+  id       Int      @id @default(autoincrement())
+  at       DateTime @default(now())
+  userId   String?
+  action   String // one of AUDIT_ACTIONS in lib/audit.ts
+  entity   String?
+  entityId String?
+  ip       String?
+  detail   String? // short scrubbed JSON text
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([action, at])
+  @@index([userId, at])
+}
