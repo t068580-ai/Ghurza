@@ -110,9 +110,34 @@ async function main() {
 
   // ---------------------------------------------------------------- 3. blind-bid ranges
   {
-    const { totalBand, turnaroundBand } = await import('../lib/bids')
+    const { totalBand, turnaroundBand, MAX_TOTAL_FILS } = await import('../lib/bids')
     const b = totalBand(245_000)
-    check('lowest total is shown as a range, not the exact figure', b.fromFils <= 245_000 && b.toFils >= 245_000 && b.toFils - b.fromFils >= 4_000, `${b.fromFils / 1000}–${b.toFils / 1000} KWD`)
+    check('lowest total is shown as a range, not the exact figure', b.fromFils === 200_000 && b.toFils === 299_999, `${b.fromFils / 1000}–${(b.toFils + 1) / 1000} KWD`)
+    // The audit showed a value-dependent band could be decoded back to ~5 KWD. With
+    // fixed edges, every total inside a band must give byte-identical output, so the
+    // output carries no information beyond the band itself.
+    // Totals run from 2 KWD (1 + 1) to MAX_TOTAL_FILS (10,000 + 10,000). Every band,
+    // including the open-ended top one, is checked over that whole range.
+    const MIN_TOTAL_FILS = 2_000
+    const seen = new Map<string, { outputs: Set<string>; lo: number; hi: number }>()
+    let outside = 0
+    for (let fils = MIN_TOTAL_FILS; fils <= MAX_TOTAL_FILS; fils += 500) {
+      const out = totalBand(fils)
+      const openEnded = out.toFils === out.fromFils
+      if (fils < out.fromFils || (!openEnded && fils > out.toFils)) outside++
+      const k = `${out.fromFils}`
+      const s = seen.get(k) ?? { outputs: new Set<string>(), lo: fils, hi: fils }
+      s.outputs.add(JSON.stringify(out))
+      s.hi = fils
+      seen.set(k, s)
+    }
+    const bands = [...seen.values()]
+    const variable = bands.filter((s) => s.outputs.size > 1).length
+    check('every total inside a band produces the identical range (nothing to decode)', outside === 0 && variable === 0, `${bands.length} bands, 2–20,000 KWD`)
+    // A band that can only hold one possible total would reveal that total. Require
+    // every band to span at least 20 KWD of possible totals.
+    const narrowest = Math.min(...bands.map((s) => s.hi - s.lo))
+    check('every band, including the open-ended top one, spans at least 20 KWD of possible totals', narrowest >= 20_000, `narrowest ${narrowest / 1000} KWD`)
     check('fastest turnaround is shown as a band', turnaroundBand(12) === '1–2 weeks')
   }
 
@@ -124,7 +149,16 @@ async function main() {
     const allowed = results.filter(Boolean).length
     check('40 parallel attempts against a limit of 5: exactly 5 allowed', allowed === 5, `${allowed} allowed`)
     await reset(key)
+
+    // The audit's rollover case: the window has just EXPIRED when a burst arrives.
+    // Every request sees the old window; only one may restart it.
     const { db } = await import('../lib/db')
+    const rollKey = `selftest:${randomUUID()}`
+    await db.rateLimit.create({ data: { key: rollKey, count: 5, windowStart: new Date(Date.now() - 2 * 3_600_000) } })
+    const rolled = await Promise.all(Array.from({ length: 40 }, () => consume(rollKey, 5, 60_000)))
+    const rolledAllowed = rolled.filter(Boolean).length
+    check('burst of 40 right after the window expires: still at most 5 allowed', rolledAllowed <= 5 && rolledAllowed >= 1, `${rolledAllowed} allowed`)
+    await reset(rollKey)
     await db.$disconnect()
   }
 

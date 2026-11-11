@@ -8,11 +8,16 @@ const PARAMS = { N: 32768, r: 8, p: 3 }
 const KEYLEN = 64
 const MAXMEM = 64 * 1024 * 1024
 
-// At most 4 password hashes run at once; up to 100 more wait in line, and anything
-// beyond that is refused. A flood of logins can then only slow logins down. It
-// can't tie up all of Node's worker threads and stall file reads and DB calls for
-// everyone else.
-const MAX_CONCURRENT = 4
+// At most 2 password hashes run at once; up to 100 more wait in line, and anything
+// beyond that is refused. Node's worker-thread pool has 4 threads by default
+// (UV_THREADPOOL_SIZE) and also serves file reads, crypto and zlib, so keeping
+// scrypt to 2 leaves half the pool free: a login flood slows logins down but
+// can't stall the rest of the app. (An earlier version used 4, i.e. the whole
+// pool. OWASP audit finding.)
+// What this does NOT stop: a flood can still fill the login queue for everyone.
+// Per-client limits need the real client IP, which only a trusted reverse proxy can
+// supply (TRUST_PROXY=true). See DESIGN.md §13.
+const MAX_CONCURRENT = 2
 const MAX_QUEUE = 100
 let active = 0
 const waiting: (() => void)[] = []

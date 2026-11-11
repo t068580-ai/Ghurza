@@ -22,12 +22,27 @@ export type CompetitionView = {
   fastestTurnaround: string | null
 }
 
-// Rounds a total into a band about 10% wide (at least 5 KWD), aligned to the band
-// width, e.g. 245.000 KWD -> 240–264 KWD.
+// FIXED band edges in KWD. They must never depend on the hidden value: an earlier
+// version sized the band from the value itself, and the band then decoded back to
+// a 5 KWD window (OWASP audit finding). With fixed edges, every total inside a band
+// produces exactly the same output, so the band reveals nothing more than itself.
+// The top band is open-ended ("from 15,000 KWD"). It must still contain many
+// possible totals: a bid's total is at most 20,000 KWD (two parts of at most
+// 10,000), so a band starting AT 20,000 would hold exactly one value and reveal it.
+// (Found by the OWASP re-check.)
+export const MAX_TOTAL_FILS = 20_000_000
+const BAND_EDGES_KWD = [0, 25, 50, 75, 100, 150, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 5000, 7500, 10000, 15000]
+
 export function totalBand(fils: number): { fromFils: number; toFils: number } {
-  const width = Math.max(5000, Math.round((fils * 0.1) / 1000) * 1000)
-  const from = Math.floor(fils / width) * width
-  return { fromFils: from, toFils: from + width - 1000 }
+  const kwd = fils / 1000
+  for (let i = BAND_EDGES_KWD.length - 1; i >= 0; i--) {
+    if (kwd >= BAND_EDGES_KWD[i]) {
+      const upper = BAND_EDGES_KWD[i + 1]
+      // Last band is open-ended; "toFils" is then the band start (shown as "from X").
+      return { fromFils: BAND_EDGES_KWD[i] * 1000, toFils: upper ? upper * 1000 - 1 : BAND_EDGES_KWD[i] * 1000 }
+    }
+  }
+  return { fromFils: 0, toFils: BAND_EDGES_KWD[1] * 1000 - 1 }
 }
 
 export function turnaroundBand(days: number): string {

@@ -62,7 +62,7 @@ Customer ──posts──▶ Request ──1:N──▶ Bid ──1:N──▶ 
 - **One login, two roles.** The role is read from the database on every request and never changes
   after signup (a database trigger enforces this too).
 - **Blind bidding.** A tailor's queries can only load their own bid. Competitors come back as a SQL
-  `COUNT`/`MIN` aggregate, shown only as **ranges** (e.g. "225–249 KWD", "1–2 weeks"), so no other
+  `COUNT`/`MIN` aggregate, shown only as **fixed ranges** (e.g. "200–300 KWD", "1–2 weeks"), so no other
   tailor's name or exact numbers ever reach the browser.
 - **Revisions add, never overwrite.** Each change appends a `BidRevision`. A declined bid can be
   revised, and that puts it back in front of the customer.
@@ -114,17 +114,37 @@ per-order-id) chat rate limiting so the limits table can't be grown with made-up
 
 ---
 
-## Homework: OWASP audit
-
-From this folder in Claude Code:
+## OWASP audit (homework)
 
 > Install the OWASP security audit skill from https://github.com/agamm/claude-code-owasp and run a
 > full security audit on my project. List every vulnerability you find and what I should do to fix it.
 
-Take a screenshot of the output, fix at least one finding, then re-run. Good candidates are in
-**DESIGN.md §13 Known limitations**. The most valuable one left is that the page CSP has no
-`script-src` yet, so a nonce-based CSP is the natural next fix. There is also no password reset,
-email verification or MFA.
+The skill (commit `1ae29cb`) was installed into this project's `.claude/skills/` (gitignored) and
+run with its own five-step workflow and report format.
+
+| | Report | Screenshot |
+|---|---|---|
+| Before fixes | [docs/owasp-audit-1-before.md](docs/owasp-audit-1-before.md) | [png](docs/owasp-audit-1-before.png) |
+| Re-check after fixes | [docs/owasp-audit-2-after.md](docs/owasp-audit-2-after.md) | [png](docs/owasp-audit-2-after.png) |
+| Submission PDF (analysis + audit) | [docs/khiaty-systems-analysis.pdf](docs/khiaty-systems-analysis.pdf) | |
+
+**First run:** 0 critical · 0 high · 3 medium · 4 low. The audit showed that two fixes from the
+earlier review didn't fully hold.
+
+**Fixed:**
+- **Login lockout bypass at window rollover.** Before the fix, 24 of 40 requests got through. Now only the request that restarts the window passes as #1; the rest are re-counted, so 5 of 40 get through.
+- **Blind-bid ranges were decodable to a 5 KWD window.** Bands now use fixed edges. The auditor's re-check found that the top band could still reveal a value at the price cap, and that is fixed too.
+- **Missing `Cross-Origin-Opener-Policy`** header.
+- **Partly fixed: login DoS.** Password hashing is now limited to 2 concurrent operations, so a flood no longer starves the thread pool. Per-client limits still need a reverse proxy.
+
+New tests for every fix are in `npm run test:security` (25/25 pass). Each one fails on the old code.
+
+**Still open:**
+- Medium: login DoS without a proxy
+- Low: signup reveals which emails are registered
+- Low: the common-password list has only 15 entries
+- Low: no password change or MFA
+- Low: no CSP `script-src`. A nonce-based CSP is the natural next fix.
 
 ---
 

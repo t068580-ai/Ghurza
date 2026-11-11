@@ -76,7 +76,9 @@ export default async function TailorRequestPage({ params }: { params: Promise<{ 
                 <div className="stat-label">Lowest total</div>
                 <div className="stat-value small">
                   {competition.lowestTotalRange
-                    ? `${Math.round(competition.lowestTotalRange.fromFils / 1000)}–${Math.round(competition.lowestTotalRange.toFils / 1000)} KWD`
+                    ? competition.lowestTotalRange.toFils > competition.lowestTotalRange.fromFils
+                      ? `${competition.lowestTotalRange.fromFils / 1000} to under ${Math.ceil(competition.lowestTotalRange.toFils / 1000)} KWD`
+                      : `${competition.lowestTotalRange.fromFils / 1000} KWD or more`
                     : '—'}
                 </div>
               </div>

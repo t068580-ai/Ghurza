@@ -5,6 +5,9 @@ const securityHeaders = [
   { key: 'X-Content-Type-Options', value: 'nosniff' },
   { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
   { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+  // Pages opened from another site can't keep a handle to this window (tab-nabbing,
+  // cross-window leaks). Listed in DESIGN.md but missing until the OWASP audit.
+  { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
   {
     key: 'Content-Security-Policy',
     // Script rules are left to Next.js defaults (it needs inline bootstrap scripts);

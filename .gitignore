@@ -11,3 +11,7 @@ prisma/*.db-journal
 prisma/*.db-wal
 prisma/demo-credentials.txt
 uploads/
+
+# locally installed Claude Code skills (third-party, not part of the app)
+.claude/
+public/_audit/

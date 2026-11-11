@@ -96,10 +96,11 @@ The rest of this document is the synthesized design. These points are what the c
 - **CSP:** `frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'` for pages, with **no `script-src`** yet (left to Next's defaults); `default-src 'none'; sandbox` for `/api/files/*`. A nonce-based `script-src` is an open item (see 13.4).
 - **Not built yet:** the `/account/password` page, the ESLint import-boundary config, and the vitest suite. Their checks are covered for now by `npm run test:security` (`scripts/security-selftest.ts` + `scripts/check-triggers.mjs`) and the manual checks listed in the README.
 - **Changed after the independent review** (details in the README):
-  - Blind-bid figures are **ranges** (about 10% wide, at least 5 KWD; turnaround in bands), not exact minimums, because a sock-puppet tailor account can always reach the threshold.
+  - Blind-bid figures are **ranges**, not exact minimums, because a sock-puppet tailor account can always reach the threshold. After the OWASP audit the bands use **fixed edges** (0, 25, 50, 75, 100, 150, 200, 300… KWD). The first version sized the band from the hidden value, which let the band decode back to a 5 KWD window.
   - `MOCK_PAYMENTS` defaults to `false`, and boot fails if it is `true` in production.
-  - Rate limits use an atomic increment and count each attempt before the password check.
-  - Password hashing is capped at 4 concurrent operations, with a bounded queue.
+  - Rate limits use an atomic increment and count each attempt before the password check. After the OWASP audit, only the single request that restarts an expired window passes as #1; the rest are re-counted. The old code let 24 of a 40-request burst through at rollover.
+  - Password hashing is capped at **2** concurrent operations (after the OWASP audit; it was 4, which is the whole default libuv pool), with a bounded queue.
+  - `Cross-Origin-Opener-Policy: same-origin` is sent (OWASP audit).
   - `clientIp()` uses the right-most `X-Forwarded-For` hop.
   - Signup is limited per email.
   - The callback body is capped while streaming.
@@ -193,7 +194,7 @@ The first statement of every page and route handler is the guard shown. Every se
 - Verification recomputes with the **stored** parameters and compares with `timingSafeEqual`. `needsRehash()` upgrades the hash on login when the parameters change.
 - Policy (zod):
   - 12 to 128 characters after NFKC;
-  - not in the bundled common-password list (`lib/common-passwords.ts`, about 10k entries);
+  - not in the common-password list. **As built, this list has only 15 entries** (in `lib/password.ts`), far below ASVS 5.0 6.2.4's top-3000. It is an open item from the OWASP audit;
   - must not contain the email local part;
   - no composition rules.
 - `lib/scrypt-core.mjs` holds the pure functions, so the plain-Node `prisma/seed.mjs` can share them.
@@ -541,7 +542,8 @@ Rejected: any backward move or skip; a customer firing a tailor event; any clien
 4. The page CSP has no `script-src` yet, so it does not restrict scripts at all; React's escaping is the only XSS defense. Adding a nonce-based `script-src` (Next's `proxy.ts` can generate the nonce) is the most valuable hardening left.
 5. Images are not re-encoded. Metadata is stripped, but polyglot risk is contained by nosniff, the sandbox CSP and the authorized route.
 6. The IP-based rate limit trusts `x-forwarded-for` only when `TRUST_PROXY=true`, and the per-account key is the one that matters. A known account can be locked for 15 minutes by someone else.
-7. There is no email verification, password reset or MFA. Signup can reveal that an email is taken; the signup rate limit mitigates this.
+7. There is no email verification, password reset, password change, "sign out everywhere" or MFA. Signup reveals that an email is taken, and anyone can register under someone else's email. These are open LOW items from the OWASP audit.
+7a. Without a trusted reverse proxy (`TRUST_PROXY=true`), the app can't see client IPs. An unauthenticated flood can therefore fill the shared login queue, and 6 wrong guesses lock a known account for 15 minutes. This is the open part of the OWASP audit's login-DoS finding; the real fix is per-client limits at the proxy.
 8. Showing a minimum always leaks a little over time, for example by watching it change. The threshold of 2 competitors keeps it unattributable.
 9. Chat has up to 3 to 15 s of latency (polling). Polling writes a rate-limit row per request, which is fine locally.
 10. Order cancellation, disputes, refunds and admin moderation are out of scope.

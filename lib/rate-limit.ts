@@ -20,7 +20,7 @@ export async function isBlocked(key: string): Promise<boolean> {
 // INSERT ... ON CONFLICT DO UPDATE on SQLite). A read-then-write version would let
 // 200 parallel requests all read "count = 0" and all pass; this one gives each
 // request its own number, so request #6 of 5 is refused even under a burst.
-export async function consume(key: string, limit: number, windowMs: number, blockMs = windowMs): Promise<boolean> {
+export async function consume(key: string, limit: number, windowMs: number, blockMs = windowMs, attempt = 0): Promise<boolean> {
   const now = new Date()
   const row = await db.rateLimit.upsert({
     where: { key },
@@ -30,12 +30,18 @@ export async function consume(key: string, limit: number, windowMs: number, bloc
   if (row.blockedUntil && row.blockedUntil > now) return false
 
   if (row.windowStart.getTime() + windowMs <= now.getTime()) {
-    // The previous window is over: start a fresh one with this request as #1.
-    await db.rateLimit.updateMany({
+    // The previous window is over. Exactly ONE request may restart it (compare-and-set
+    // on the old windowStart) and count as #1. Every other request in the same burst
+    // lost that race and must be counted again in the NEW window. An earlier version
+    // returned true for all of them, so a burst at each rollover slipped past the
+    // limit (OWASP audit finding).
+    const restarted = await db.rateLimit.updateMany({
       where: { key, windowStart: row.windowStart },
       data: { count: 1, windowStart: now, blockedUntil: null },
     })
-    return true
+    if (restarted.count === 1) return true
+    if (attempt >= 3) return false // fail closed if it keeps losing the race
+    return consume(key, limit, windowMs, blockMs, attempt + 1)
   }
 
   if (row.count > limit) {
