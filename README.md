@@ -4,9 +4,12 @@ A two-sided marketplace built for the W4D2 systems-analysis exercise: customers 
 tailors bid **blind**, the customer pays a deposit through a payment provider, they chat once the
 order exists, and the order closes with the balance, finished photos and a permanent review.
 
-It is my own version of the system I reverse-engineered, not a copy of its screens. The design
-reasoning (data model, every route and who may call it, the payment flow, OWASP mapping) is in
-[DESIGN.md](DESIGN.md).
+It is my own version of the system I reverse-engineered, not a copy of its screens.
+
+- **The analysis this build starts from** (Parts 1–4 and the Systems Analysis):
+  [docs/khiaty-systems-analysis.md](docs/khiaty-systems-analysis.md)
+- **The design** (data model, every route and who may call it, the payment flow, OWASP mapping):
+  [DESIGN.md](DESIGN.md)
 
 **Stack:** Next.js 16 (App Router, Server Actions) · React 19 · Prisma 5 + SQLite · zod 4 ·
 no auth or payment SaaS, so every security control is visible in this repo.
@@ -133,4 +136,5 @@ lib/                 all rules live here: auth, authz, bids, payments/*, uploads
 prisma/schema.prisma data model     prisma/sql/triggers.sql  database backstop
 prisma/seed.ts       demo data      scripts/check-triggers.mjs  database security check
 DESIGN.md            full design, route table and OWASP Top 10 mapping
+docs/                the reverse-engineering analysis of the reference system (Parts 1–4)
 ```
